@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { dbGet, dbAll } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
+import supabase from '@/lib/db';
 
 // GET /api/reports/dashboard - Get dashboard statistics
 export async function GET(request: NextRequest) {
@@ -13,90 +13,92 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const month = searchParams.get('month'); // YYYY-MM format
 
-    let dateFilter = '';
-    const params: any[] = [];
-
+    // Build date filter for month if provided
+    let dateFilter: any = {};
     if (month) {
-      dateFilter = "WHERE strftime('%Y-%m', created_at) = ?";
-      params.push(month);
+      const startDate = `${month}-01`;
+      const endDate = `${month}-31`;
+      dateFilter = {
+        gte: startDate,
+        lte: endDate,
+      };
     }
 
     // Total leads
-    const totalLeadsResult = await dbGet(
-      `SELECT COUNT(*) as count FROM leads ${dateFilter}`,
-      params
-    ) as any;
-    const totalLeads = totalLeadsResult?.count || 0;
+    let leadsQuery = supabase.from('leads').select('id', { count: 'exact', head: true });
+    if (month) {
+      leadsQuery = leadsQuery.gte('created_at', `${month}-01`).lte('created_at', `${month}-31`);
+    }
+    const { count: totalLeads } = await leadsQuery;
 
     // Leads by status
-    const leadsByStatus = await dbAll(
-      `SELECT status, COUNT(*) as count
-       FROM leads
-       ${dateFilter}
-       GROUP BY status`,
-      params
-    );
+    let statusQuery = supabase.from('leads').select('status');
+    if (month) {
+      statusQuery = statusQuery.gte('created_at', `${month}-01`).lte('created_at', `${month}-31`);
+    }
+    const { data: allLeads } = await statusQuery;
+    
+    const leadsByStatusMap = new Map<string, number>();
+    allLeads?.forEach((lead: any) => {
+      const count = leadsByStatusMap.get(lead.status) || 0;
+      leadsByStatusMap.set(lead.status, count + 1);
+    });
+    const leadsByStatus = Array.from(leadsByStatusMap.entries()).map(([status, count]) => ({ status, count }));
 
     // Leads by trade type
-    const leadsByTrade = await dbAll(
-      `SELECT trade_type, COUNT(*) as count
-       FROM leads
-       ${dateFilter}
-       GROUP BY trade_type`,
-      params
-    );
+    const tradeTypeMap = new Map<string, number>();
+    allLeads?.forEach((lead: any) => {
+      const count = tradeTypeMap.get(lead.trade_type) || 0;
+      tradeTypeMap.set(lead.trade_type, count + 1);
+    });
+    const leadsByTrade = Array.from(tradeTypeMap.entries()).map(([trade_type, count]) => ({ trade_type, count }));
 
     // Leads by town
-    const leadsByTown = await dbAll(
-      `SELECT town, COUNT(*) as count
-       FROM leads
-       WHERE town IS NOT NULL AND town != ''
-       ${month ? "AND strftime('%Y-%m', created_at) = ?" : ''}
-       GROUP BY town
-       ORDER BY count DESC
-       LIMIT 10`,
-      month ? [month] : []
-    );
+    const townMap = new Map<string, number>();
+    allLeads?.forEach((lead: any) => {
+      if (lead.town) {
+        const count = townMap.get(lead.town) || 0;
+        townMap.set(lead.town, count + 1);
+      }
+    });
+    const leadsByTown = Array.from(townMap.entries())
+      .map(([town, count]) => ({ town, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
 
-    // Conversion rate (completed + paid / total)
-    const conversionStats = await dbGet(
-      `SELECT 
-         COUNT(*) as total,
-         SUM(CASE WHEN status IN ('completed', 'paid', 'closed') THEN 1 ELSE 0 END) as converted
-       FROM leads
-       ${dateFilter}`,
-      params
-    ) as any;
-
-    const conversionRate = conversionStats?.total > 0
-      ? ((conversionStats.converted / conversionStats.total) * 100).toFixed(1)
+    // Conversion rate
+    const convertedCount = allLeads?.filter((lead: any) => 
+      ['completed', 'paid', 'closed'].includes(lead.status)
+    ).length || 0;
+    const conversionRate = totalLeads && totalLeads > 0
+      ? ((convertedCount / totalLeads) * 100).toFixed(1)
       : '0';
 
     // Revenue
-    const revenue = await dbGet(
-      `SELECT 
-         COALESCE(SUM(amount), 0) as total,
-         COUNT(*) as count
-       FROM payments
-       WHERE status = 'paid'
-       ${month ? "AND strftime('%Y-%m', created_at) = ?" : ''}`,
-      month ? [month] : []
-    ) as any;
-
-    // Revenue per lead
-    const revenuePerLead = conversionStats?.total > 0
-      ? (revenue?.total / conversionStats.total).toFixed(2)
+    let revenueQuery = supabase
+      .from('payments')
+      .select('amount')
+      .eq('status', 'paid');
+    if (month) {
+      revenueQuery = revenueQuery.gte('created_at', `${month}-01`).lte('created_at', `${month}-31`);
+    }
+    const { data: paidPayments } = await revenueQuery;
+    
+    const revenueTotal = paidPayments?.reduce((sum: number, p: any) => sum + (p.amount || 0), 0) || 0;
+    const revenueCount = paidPayments?.length || 0;
+    const revenuePerLead = totalLeads && totalLeads > 0
+      ? (revenueTotal / totalLeads).toFixed(2)
       : '0';
 
     return NextResponse.json({
-      totalLeads,
+      totalLeads: totalLeads || 0,
       leadsByStatus,
       leadsByTrade,
       leadsByTown,
       conversionRate: parseFloat(conversionRate),
       revenue: {
-        total: revenue?.total || 0,
-        count: revenue?.count || 0,
+        total: revenueTotal,
+        count: revenueCount,
         perLead: parseFloat(revenuePerLead),
       },
     });

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDatabase, dbAll, dbGet, dbRun } from '@/lib/db';
+import { dbAll, dbRun } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
+import supabase from '@/lib/db';
 
 // GET /api/payments - Get all payments
 export async function GET(request: NextRequest) {
@@ -10,14 +11,40 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const payments = await dbAll(
-      `SELECT p.*, l.name as lead_name, l.trade_type
-       FROM payments p
-       JOIN leads l ON p.lead_id = l.id
-       ORDER BY p.created_at DESC`
-    );
+    // Get payments
+    const { data: payments, error } = await supabase
+      .from('payments')
+      .select('*')
+      .order('created_at', { ascending: false });
 
-    return NextResponse.json({ payments });
+    if (error) throw error;
+
+    // Get lead info for payments
+    const leadIds = [...new Set(payments?.map((p: any) => p.lead_id) || [])];
+    const leadMap = new Map();
+    
+    if (leadIds.length > 0) {
+      const { data: leads } = await supabase
+        .from('leads')
+        .select('id, name, trade_type')
+        .in('id', leadIds);
+      
+      leads?.forEach((lead: any) => {
+        leadMap.set(lead.id, { name: lead.name, trade_type: lead.trade_type });
+      });
+    }
+
+    // Transform to match expected format
+    const transformedPayments = payments?.map((payment: any) => {
+      const lead = leadMap.get(payment.lead_id);
+      return {
+        ...payment,
+        lead_name: lead?.name || null,
+        trade_type: lead?.trade_type || null,
+      };
+    }) || [];
+
+    return NextResponse.json({ payments: transformedPayments });
   } catch (error) {
     console.error('Get payments error:', error);
     return NextResponse.json(
@@ -45,34 +72,26 @@ export async function POST(request: NextRequest) {
     }
 
     // Insert payment
-    await dbRun(
-      'INSERT INTO payments (lead_id, amount, status, invoice_number, payment_date) VALUES (?, ?, ?, ?, ?)',
-      [
-        lead_id,
-        amount,
-        status,
-        invoice_number || null,
-        status === 'paid' ? new Date().toISOString() : null
-      ]
-    );
-
-    // Get the last inserted ID
-    const lastIdResult = await dbGet('SELECT last_insert_rowid() as id');
-    const paymentId = lastIdResult?.id;
+    const payment = await dbRun('payments', {
+      lead_id,
+      amount,
+      status,
+      invoice_number: invoice_number || null,
+      payment_date: status === 'paid' ? new Date().toISOString() : null,
+    }, 'insert');
 
     // Update lead status if paid
     if (status === 'paid') {
-      await dbRun('UPDATE leads SET status = ? WHERE id = ?', ['paid', lead_id]);
+      await dbRun('leads', { status: 'paid' }, 'update', { id: lead_id });
     }
 
     // Log activity
-    const db = await getDatabase();
-    const stmt = db.prepare('INSERT INTO activity_logs (lead_id, user_id, action, details) VALUES (?, ?, ?, ?)');
-    stmt.bind([lead_id, user.id, 'payment_recorded', JSON.stringify({ amount, status })]);
-    stmt.step();
-    stmt.free();
-
-    const payment = await dbGet('SELECT * FROM payments WHERE id = ?', [paymentId]);
+    await dbRun('activity_logs', {
+      lead_id,
+      user_id: user.id,
+      action: 'payment_recorded',
+      details: JSON.stringify({ amount, status }),
+    }, 'insert');
 
     return NextResponse.json({ payment }, { status: 201 });
   } catch (error) {

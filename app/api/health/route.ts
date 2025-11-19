@@ -1,21 +1,26 @@
 import { NextResponse } from 'next/server';
-import { getDatabase } from '@/lib/db';
+import supabase from '@/lib/db';
 
 // GET /api/health - Diagnostic endpoint to test database
 export async function GET() {
   try {
-    const db = await getDatabase();
-    
-    // Try a simple query
-    const stmt = db.prepare('SELECT 1 as test');
-    stmt.step();
-    const result = stmt.getAsObject();
-    stmt.free();
+    // Test Supabase connection
+    const { data, error } = await supabase
+      .from('users')
+      .select('count')
+      .limit(1);
+
+    if (error && error.code !== 'PGRST116') {
+      throw error;
+    }
 
     return NextResponse.json({
       status: 'ok',
       database: 'connected',
-      test: result,
+      supabase: {
+        url: process.env.NEXT_PUBLIC_SUPABASE_URL ? 'configured' : 'missing',
+        key: process.env.SUPABASE_SERVICE_ROLE_KEY ? 'configured' : 'missing',
+      },
       environment: {
         isServerless: !!(process.env.NETLIFY || process.env.VERCEL),
         nodeEnv: process.env.NODE_ENV,
@@ -32,4 +37,3 @@ export async function GET() {
     }, { status: 500 });
   }
 }
-

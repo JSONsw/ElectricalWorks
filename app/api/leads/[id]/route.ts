@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDatabase, dbGet, dbAll, dbRun } from '@/lib/db';
+import { dbGet, dbAll, dbRun } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
+import supabase from '@/lib/db';
 
 // GET /api/leads/[id] - Get single lead
 export async function GET(
@@ -13,15 +14,14 @@ export async function GET(
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const lead = await dbGet(
-      `SELECT l.*, u.name as assigned_trade_name, u.phone as assigned_trade_phone, u.email as assigned_trade_email
-       FROM leads l
-       LEFT JOIN users u ON l.assigned_trade_id = u.id
-       WHERE l.id = ?`,
-      [params.id]
-    ) as any;
+    // Get lead
+    const { data: lead, error: leadError } = await supabase
+      .from('leads')
+      .select('*')
+      .eq('id', params.id)
+      .single();
 
-    if (!lead) {
+    if (leadError || !lead) {
       return NextResponse.json({ error: 'Lead not found' }, { status: 404 });
     }
 
@@ -30,20 +30,28 @@ export async function GET(
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
+    // Get assigned trade info if exists
+    let assignedTrade = null;
+    if (lead.assigned_trade_id) {
+      assignedTrade = await dbGet('users', { id: lead.assigned_trade_id }, 'name, phone, email');
+    }
+
+    // Transform to match expected format
+    const transformedLead = {
+      ...lead,
+      assigned_trade_name: assignedTrade?.name || null,
+      assigned_trade_phone: assignedTrade?.phone || null,
+      assigned_trade_email: assignedTrade?.email || null,
+    };
+
     // Get activity logs
-    const activities = await dbAll(
-      'SELECT * FROM activity_logs WHERE lead_id = ? ORDER BY created_at DESC',
-      [params.id]
-    );
+    const activities = await dbAll('activity_logs', { lead_id: parseInt(params.id) }, '*', 'created_at DESC');
 
     // Get payments
-    const payments = await dbAll(
-      'SELECT * FROM payments WHERE lead_id = ? ORDER BY created_at DESC',
-      [params.id]
-    );
+    const payments = await dbAll('payments', { lead_id: parseInt(params.id) }, '*', 'created_at DESC');
 
     return NextResponse.json({
-      lead,
+      lead: transformedLead,
       activities,
       payments,
     });
@@ -76,35 +84,30 @@ export async function PATCH(
       'urgency',
     ];
 
-    const updates: string[] = [];
-    const values: any[] = [];
-
+    const updates: any = {};
     for (const [key, value] of Object.entries(data)) {
       if (allowedFields.includes(key) && value !== undefined) {
-        updates.push(`${key} = ?`);
-        values.push(value);
+        updates[key] = value;
       }
     }
 
-    if (updates.length === 0) {
+    if (Object.keys(updates).length === 0) {
       return NextResponse.json({ error: 'No valid fields to update' }, { status: 400 });
     }
 
-    updates.push('updated_at = CURRENT_TIMESTAMP');
-    values.push(params.id);
+    updates.updated_at = new Date().toISOString();
 
-    const query = `UPDATE leads SET ${updates.join(', ')} WHERE id = ?`;
-    await dbRun(query, values);
+    // Update lead
+    const lead = await dbRun('leads', updates, 'update', { id: parseInt(params.id) });
 
     // Log activity
     const action = data.assigned_trade_id ? 'lead_assigned' : 'lead_updated';
-    const details = JSON.stringify(data);
-    await dbRun(
-      'INSERT INTO activity_logs (lead_id, user_id, action, details) VALUES (?, ?, ?, ?)',
-      [params.id, user.id, action, details]
-    );
-
-    const lead = await dbGet('SELECT * FROM leads WHERE id = ?', [params.id]);
+    await dbRun('activity_logs', {
+      lead_id: parseInt(params.id),
+      user_id: user.id,
+      action,
+      details: JSON.stringify(data),
+    }, 'insert');
 
     return NextResponse.json({ lead });
   } catch (error) {

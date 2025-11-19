@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDatabase, dbAll, dbGet, dbRun } from '@/lib/db';
+import { dbAll, dbGet, dbRun } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
+import { hashPassword } from '@/lib/auth';
 
 // GET /api/trades - Get all tradespeople
 export async function GET(request: NextRequest) {
@@ -10,10 +11,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const trades = await dbAll(
-      'SELECT id, name, email, phone, trade_type, location, rating, availability FROM users WHERE role = ?',
-      ['trade']
-    );
+    const trades = await dbAll('users', { role: 'trade' }, 'id, name, email, phone, trade_type, location, rating, availability');
 
     return NextResponse.json({ trades });
   } catch (error) {
@@ -42,11 +40,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { hashPassword } = require('@/lib/auth');
     const hashedPassword = hashPassword(password);
 
     // Check if email already exists
-    const existing = await dbGet('SELECT id FROM users WHERE email = ?', [email]);
+    const existing = await dbGet('users', { email });
     if (existing) {
       return NextResponse.json(
         { error: 'Email already exists' },
@@ -55,25 +52,19 @@ export async function POST(request: NextRequest) {
     }
 
     // Insert trade user
-    await dbRun(
-      'INSERT INTO users (email, password, name, role, trade_type, location, phone) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [email, hashedPassword, name, 'trade', trade_type, location || null, phone || null]
-    );
+    const trade = await dbRun('users', {
+      email,
+      password: hashedPassword,
+      name,
+      role: 'trade',
+      trade_type,
+      location: location || null,
+      phone: phone || null,
+    }, 'insert');
 
-    // Get the last inserted ID
-    const lastIdResult = await dbGet('SELECT last_insert_rowid() as id');
-    const tradeId = lastIdResult?.id;
-
-    if (!tradeId) {
-      throw new Error('Failed to get trade ID');
-    }
-
-    const trade = await dbGet(
-      'SELECT id, name, email, trade_type, location FROM users WHERE id = ?',
-      [tradeId]
-    );
-
-    return NextResponse.json({ trade }, { status: 201 });
+    // Return without password
+    const { password: _, ...tradeWithoutPassword } = trade;
+    return NextResponse.json({ trade: tradeWithoutPassword }, { status: 201 });
   } catch (error: any) {
     console.error('Create trade error:', error);
     return NextResponse.json(

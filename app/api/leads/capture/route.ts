@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDatabase, dbGet, dbRun } from '@/lib/db';
+import { dbRun } from '@/lib/db';
 
 // POST /api/leads/capture - Public endpoint for lead capture (from website forms)
 export async function POST(request: NextRequest) {
@@ -26,29 +26,27 @@ export async function POST(request: NextRequest) {
     // Parse location into address/town if provided
     const address = location || '';
     const town = location || '';
-
     const urgency = urgent ? 'high' : 'medium';
 
     // Insert lead
-    await dbRun(
-      'INSERT INTO leads (name, phone, email, address, town, trade_type, job_description, urgency, preferred_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [name, phone, email || null, address, town, trade_type, job_description, urgency, preferred_date || null]
-    );
-
-    // Get the last inserted ID
-    const lastIdResult = await dbGet('SELECT last_insert_rowid() as id');
-    const leadId = lastIdResult?.id;
-
-    if (!leadId) {
-      throw new Error('Failed to get lead ID');
-    }
+    const lead = await dbRun('leads', {
+      name,
+      phone,
+      email: email || null,
+      address,
+      town,
+      trade_type,
+      job_description,
+      urgency,
+      preferred_date: preferred_date || null,
+    }, 'insert');
 
     // Log activity
-    const db = await getDatabase();
-    const stmt = db.prepare('INSERT INTO activity_logs (lead_id, action, details) VALUES (?, ?, ?)');
-    stmt.bind([leadId, 'lead_created', 'Lead captured from website form']);
-    stmt.step();
-    stmt.free();
+    await dbRun('activity_logs', {
+      lead_id: lead.id,
+      action: 'lead_created',
+      details: 'Lead captured from website form',
+    }, 'insert');
 
     // TODO: Send notification email to admin
     // TODO: Send confirmation email/SMS to customer
@@ -57,7 +55,7 @@ export async function POST(request: NextRequest) {
       {
         success: true,
         message: 'Thank you! We will contact you shortly.',
-        lead_id: leadId,
+        lead_id: lead.id,
       },
       { status: 201 }
     );

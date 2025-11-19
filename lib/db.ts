@@ -1,294 +1,169 @@
-import initSqlJs, { Database } from 'sql.js';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { createClient } from '@supabase/supabase-js';
 
-// Use /tmp for serverless environments (Netlify, Vercel, etc.)
-// This is the only writable directory in serverless functions
-const isServerless = process.env.NETLIFY || process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
-const dataDir = isServerless ? '/tmp' : join(process.cwd(), 'data');
-const dbPath = join(dataDir, 'crm.db');
+// Supabase configuration
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 
-let db: Database | null = null;
-let dbInitialized = false;
-let initPromise: Promise<Database> | null = null;
-
-// Initialize database
-export async function getDatabase(): Promise<Database> {
-  // If already initialized, return it
-  if (db && dbInitialized) {
-    return db;
-  }
-
-  // If initialization is in progress, wait for it
-  if (initPromise) {
-    return initPromise;
-  }
-
-  // Start initialization
-  initPromise = (async () => {
-    try {
-      // Ensure data directory exists (only needed for non-serverless)
-      if (!isServerless && !existsSync(dataDir)) {
-        mkdirSync(dataDir, { recursive: true });
-      }
-
-      // Initialize sql.js
-      // In serverless, we need to load from CDN or use bundled version
-      const SQL = await initSqlJs({
-        locateFile: (file: string) => {
-          // Try to load from CDN
-          if (file.endsWith('.wasm')) {
-            return `https://sql.js.org/dist/${file}`;
-          }
-          return file;
-        },
-        // Fallback: use node module if CDN fails
-        wasmBinary: undefined,
-      });
-
-      // Try to load existing database
-      let database: Database;
-      if (existsSync(dbPath)) {
-        try {
-          const buffer = readFileSync(dbPath);
-          database = new SQL.Database(buffer);
-        } catch (error) {
-          console.error('Error loading database, creating new one:', error);
-          database = new SQL.Database();
-        }
-      } else {
-        database = new SQL.Database();
-      }
-
-      // Initialize schema
-      await initDatabaseSchema(database);
-
-      // Save database (silently fail if can't write)
-      try {
-        saveDatabase(database);
-      } catch (error) {
-        console.warn('Could not save database to file (this is OK in serverless):', error);
-      }
-
-      db = database;
-      dbInitialized = true;
-      return database;
-    } catch (error) {
-      console.error('Database initialization error:', error);
-      // Return a fresh database even if initialization fails
-      const SQL = await initSqlJs({
-        locateFile: (file: string) => `https://sql.js.org/dist/${file}`,
-      });
-      db = new SQL.Database();
-      await initDatabaseSchema(db);
-      dbInitialized = true;
-      return db;
-    } finally {
-      initPromise = null;
-    }
-  })();
-
-  return initPromise;
+if (!supabaseUrl || !supabaseKey) {
+  console.warn('⚠️ Supabase credentials not found. Please set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.');
 }
 
-// Save database to file
-function saveDatabase(database: Database) {
-  try {
-    const data = database.export();
-    const buffer = Buffer.from(data);
-    writeFileSync(dbPath, buffer);
-  } catch (error) {
-    // Silently fail - this is expected in some serverless environments
-    // The database will still work in-memory for the current request
-  }
-}
+// Create Supabase client with service role key for admin operations
+const supabase = createClient(supabaseUrl, supabaseKey, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false,
+  },
+});
 
-// Initialize database schema
-async function initDatabaseSchema(database: Database) {
-  try {
-    // Enable foreign keys
-    database.run('PRAGMA foreign_keys = ON;');
+// Initialize database schema (run this once via SQL Editor in Supabase)
+export async function initDatabase() {
+  // This should be run via Supabase SQL Editor
+  // See SUPABASE_SETUP.md for the SQL schema
+  console.log('Database schema should be created via Supabase SQL Editor. See SUPABASE_SETUP.md');
+  
+  // Create default admin user if it doesn't exist
+  const { data: adminCheck } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', 'admin@crm.com')
+    .single();
 
-    // Users table
-    database.run(`
-      CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        name TEXT NOT NULL,
-        role TEXT NOT NULL CHECK(role IN ('admin', 'trade', 'customer')),
-        trade_type TEXT,
-        location TEXT,
-        phone TEXT,
-        rating REAL DEFAULT 0,
-        availability TEXT DEFAULT 'available',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // Leads table
-    database.run(`
-      CREATE TABLE IF NOT EXISTS leads (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        phone TEXT NOT NULL,
-        email TEXT,
-        address TEXT,
-        town TEXT,
-        trade_type TEXT NOT NULL,
-        job_description TEXT NOT NULL,
-        urgency TEXT DEFAULT 'medium' CHECK(urgency IN ('low', 'medium', 'high')),
-        status TEXT DEFAULT 'new' CHECK(status IN ('new', 'contacted', 'assigned', 'completed', 'paid', 'closed')),
-        priority TEXT DEFAULT 'medium' CHECK(priority IN ('low', 'medium', 'high')),
-        assigned_trade_id INTEGER,
-        preferred_date TEXT,
-        notes TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (assigned_trade_id) REFERENCES users(id)
-      )
-    `);
-
-    // Payments table
-    database.run(`
-      CREATE TABLE IF NOT EXISTS payments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        lead_id INTEGER NOT NULL,
-        amount REAL NOT NULL,
-        status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'paid', 'failed')),
-        invoice_number TEXT,
-        payment_date DATETIME,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (lead_id) REFERENCES leads(id)
-      )
-    `);
-
-    // Activity logs table
-    database.run(`
-      CREATE TABLE IF NOT EXISTS activity_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        lead_id INTEGER NOT NULL,
-        user_id INTEGER,
-        action TEXT NOT NULL,
-        details TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (lead_id) REFERENCES leads(id),
-        FOREIGN KEY (user_id) REFERENCES users(id)
-      )
-    `);
-
-    // Create indexes
-    try {
-      database.run(`
-        CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
-        CREATE INDEX IF NOT EXISTS idx_leads_trade_type ON leads(trade_type);
-        CREATE INDEX IF NOT EXISTS idx_leads_assigned ON leads(assigned_trade_id);
-        CREATE INDEX IF NOT EXISTS idx_leads_created ON leads(created_at);
-        CREATE INDEX IF NOT EXISTS idx_activity_lead ON activity_logs(lead_id);
-      `);
-    } catch (error) {
-      // Indexes might already exist, ignore error
-    }
-
-    // Create default admin user
-    try {
-      const stmt = database.prepare("SELECT id FROM users WHERE email = ?");
-      stmt.bind(['admin@crm.com']);
-      const result = stmt.getAsObject();
-      stmt.free();
-
-      if (!result || !result.id) {
-        const bcrypt = require('bcryptjs');
-        const hashedPassword = bcrypt.hashSync('admin123', 10);
-        const insertStmt = database.prepare(
-          'INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)'
-        );
-        insertStmt.bind(['admin@crm.com', hashedPassword, 'Admin User', 'admin']);
-        insertStmt.step();
-        insertStmt.free();
-      }
-    } catch (error) {
+  if (!adminCheck) {
+    const bcrypt = require('bcryptjs');
+    const hashedPassword = bcrypt.hashSync('admin123', 10);
+    const { error } = await supabase.from('users').insert({
+      email: 'admin@crm.com',
+      password: hashedPassword,
+      name: 'Admin User',
+      role: 'admin',
+    });
+    if (error) {
       console.error('Error creating admin user:', error);
-      // Try again with a simpler approach
-      try {
-        const bcrypt = require('bcryptjs');
-        const hashedPassword = bcrypt.hashSync('admin123', 10);
-        database.run(
-          'INSERT OR IGNORE INTO users (email, password, name, role) VALUES (?, ?, ?, ?)',
-          ['admin@crm.com', hashedPassword, 'Admin User', 'admin']
-        );
-      } catch (e) {
-        console.error('Failed to create admin user:', e);
-      }
     }
-  } catch (error) {
-    console.error('Error initializing database schema:', error);
+  }
+}
+
+// Database helper functions
+export async function dbGet(table: string, filters: any = {}, select: string = '*') {
+  let query = supabase.from(table).select(select);
+
+  // Apply filters
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== null) {
+      query = query.eq(key, value);
+    }
+  }
+
+  const { data, error } = await query.single();
+  if (error && error.code !== 'PGRST116') { // PGRST116 = not found
+    console.error('dbGet error:', error);
     throw error;
   }
+  return data || null;
 }
 
-// Helper function to convert SQL.js result to array of objects
-export function resultToArray(result: any[]): any[] {
-  if (!result || result.length === 0) return [];
-  
-  const columns = result[0].columns;
-  const values = result[0].values;
-  
-  return values.map((row: any[]) => {
-    const obj: any = {};
-    columns.forEach((col: string, index: number) => {
-      // Handle different data types
-      let value = row[index];
-      if (value === null || value === undefined) {
-        obj[col] = null;
+export async function dbAll(table: string, filters: any = {}, select: string = '*', orderBy?: string) {
+  let query = supabase.from(table).select(select);
+
+  // Apply filters
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== null) {
+      if (Array.isArray(value)) {
+        query = query.in(key, value);
       } else {
-        obj[col] = value;
+        query = query.eq(key, value);
       }
+    }
+  }
+
+  // Apply ordering
+  if (orderBy) {
+    const [column, direction] = orderBy.split(' ');
+    query = query.order(column, { ascending: direction !== 'DESC' });
+  } else {
+    query = query.order('created_at', { ascending: false });
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    console.error('dbAll error:', error);
+    throw error;
+  }
+  return data || [];
+}
+
+export async function dbRun(table: string, data: any, operation: 'insert' | 'update' | 'delete' = 'insert', filters?: any) {
+  if (operation === 'insert') {
+    const { data: result, error } = await supabase.from(table).insert(data).select().single();
+    if (error) throw error;
+    return result;
+  } else if (operation === 'update') {
+    let query = supabase.from(table).update(data);
+    if (filters) {
+      for (const [key, value] of Object.entries(filters)) {
+        query = query.eq(key, value);
+      }
+    }
+    const { data: result, error } = await query.select().single();
+    if (error) throw error;
+    return result;
+  } else if (operation === 'delete') {
+    let query = supabase.from(table).delete();
+    if (filters) {
+      for (const [key, value] of Object.entries(filters)) {
+        query = query.eq(key, value);
+      }
+    }
+    const { error } = await query;
+    if (error) throw error;
+    return { success: true };
+  }
+}
+
+// Helper for complex queries with joins
+export async function dbQuery(table: string, options: {
+  select?: string;
+  filters?: any;
+  joins?: Array<{ table: string; on: string; type?: 'left' | 'inner' }>;
+  orderBy?: string;
+}) {
+  const { select = '*', filters = {}, joins = [], orderBy } = options;
+  
+  // Build select with joins
+  let selectQuery = select;
+  if (joins.length > 0) {
+    // For Supabase, we need to use the select format with foreign table references
+    // Example: "leads(*), users:assigned_trade_id(*)"
+    const joinSelects = joins.map(join => {
+      const foreignKey = join.on.split('=')[0].trim();
+      return `${join.table}:${foreignKey}(*)`;
     });
-    return obj;
-  });
-}
-
-// Helper function to get single row
-export function resultToObject(result: any[]): any | null {
-  const arr = resultToArray(result);
-  return arr.length > 0 ? arr[0] : null;
-}
-
-// Wrapper for database operations that auto-saves
-export async function dbRun(sql: string, params: any[] = []): Promise<void> {
-  const database = await getDatabase();
-  const stmt = database.prepare(sql);
-  stmt.bind(params);
-  stmt.step();
-  stmt.free();
-  try {
-    saveDatabase(database);
-  } catch (error) {
-    // Silently fail - OK in serverless
+    selectQuery = `${select}, ${joinSelects.join(', ')}`;
   }
-}
-
-export async function dbGet(sql: string, params: any[] = []): Promise<any> {
-  const database = await getDatabase();
-  const stmt = database.prepare(sql);
-  stmt.bind(params);
-  const result = stmt.getAsObject({});
-  stmt.free();
-  return result && Object.keys(result).length > 0 ? result : null;
-}
-
-export async function dbAll(sql: string, params: any[] = []): Promise<any[]> {
-  const database = await getDatabase();
-  const stmt = database.prepare(sql);
-  stmt.bind(params);
-  const results: any[] = [];
-  while (stmt.step()) {
-    results.push(stmt.getAsObject());
+  
+  let query = supabase.from(table).select(selectQuery);
+  
+  // Apply filters
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== null) {
+      query = query.eq(key, value);
+    }
   }
-  stmt.free();
-  return results;
+  
+  // Apply ordering
+  if (orderBy) {
+    const [column, direction] = orderBy.split(' ');
+    query = query.order(column, { ascending: direction !== 'DESC' });
+  }
+  
+  const { data, error } = await query;
+  if (error) {
+    console.error('dbQuery error:', error);
+    throw error;
+  }
+  return data || [];
 }
 
-// Export database instance getter for direct access (use with caution)
-export default getDatabase;
+// Export supabase client for direct access if needed
+export default supabase;

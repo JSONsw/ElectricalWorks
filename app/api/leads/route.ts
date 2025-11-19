@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDatabase, dbAll, dbRun, dbGet } from '@/lib/db';
+import { dbAll, dbRun } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
+import supabase from '@/lib/db';
 
 // GET /api/leads - Get all leads (with filters)
 export async function GET(request: NextRequest) {
@@ -16,40 +17,59 @@ export async function GET(request: NextRequest) {
     const assignedTo = searchParams.get('assigned_to');
     const town = searchParams.get('town');
 
-    let query = 'SELECT l.*, u.name as assigned_trade_name FROM leads l LEFT JOIN users u ON l.assigned_trade_id = u.id WHERE 1=1';
-    const params: any[] = [];
+    // Build filters
+    const filters: any = {};
+    if (status) filters.status = status;
+    if (tradeType) filters.trade_type = tradeType;
+    if (assignedTo) filters.assigned_trade_id = parseInt(assignedTo);
+    if (town) filters.town = town;
 
     // Trade users can only see their assigned leads
     if (user.role === 'trade') {
-      query += ' AND l.assigned_trade_id = ?';
-      params.push(user.id);
+      filters.assigned_trade_id = user.id;
     }
 
-    if (status) {
-      query += ' AND l.status = ?';
-      params.push(status);
+    // Get leads
+    let query = supabase
+      .from('leads')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    // Apply filters
+    for (const [key, value] of Object.entries(filters)) {
+      if (value !== undefined && value !== null) {
+        query = query.eq(key, value);
+      }
     }
 
-    if (tradeType) {
-      query += ' AND l.trade_type = ?';
-      params.push(tradeType);
+    const { data: leads, error } = await query;
+
+    if (error) {
+      throw error;
     }
 
-    if (assignedTo) {
-      query += ' AND l.assigned_trade_id = ?';
-      params.push(assignedTo);
+    // Get assigned trade names for leads that have assignments
+    const assignedTradeIds = [...new Set(leads?.filter((l: any) => l.assigned_trade_id).map((l: any) => l.assigned_trade_id) || [])];
+    const tradeMap = new Map();
+    
+    if (assignedTradeIds.length > 0) {
+      const { data: trades } = await supabase
+        .from('users')
+        .select('id, name')
+        .in('id', assignedTradeIds);
+      
+      trades?.forEach((trade: any) => {
+        tradeMap.set(trade.id, trade.name);
+      });
     }
 
-    if (town) {
-      query += ' AND l.town = ?';
-      params.push(town);
-    }
+    // Transform the data to match expected format
+    const transformedLeads = leads?.map((lead: any) => ({
+      ...lead,
+      assigned_trade_name: lead.assigned_trade_id ? tradeMap.get(lead.assigned_trade_id) || null : null,
+    })) || [];
 
-    query += ' ORDER BY l.created_at DESC';
-
-    const leads = await dbAll(query, params);
-
-    return NextResponse.json({ leads });
+    return NextResponse.json({ leads: transformedLeads });
   } catch (error) {
     console.error('Get leads error:', error);
     return NextResponse.json(
@@ -83,28 +103,24 @@ export async function POST(request: NextRequest) {
     }
 
     // Insert lead
-    await dbRun(
-      'INSERT INTO leads (name, phone, email, address, town, trade_type, job_description, urgency, preferred_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [name, phone, email || null, address || null, town || null, trade_type, job_description, urgency, preferred_date || null]
-    );
-
-    // Get the last inserted ID
-    const lastIdResult = await dbGet('SELECT last_insert_rowid() as id');
-    const leadId = lastIdResult?.id;
-
-    if (!leadId) {
-      throw new Error('Failed to get lead ID');
-    }
+    const lead = await dbRun('leads', {
+      name,
+      phone,
+      email: email || null,
+      address: address || null,
+      town: town || null,
+      trade_type,
+      job_description,
+      urgency,
+      preferred_date: preferred_date || null,
+    }, 'insert');
 
     // Log activity
-    const db = await getDatabase();
-    const stmt = db.prepare('INSERT INTO activity_logs (lead_id, action, details) VALUES (?, ?, ?)');
-    stmt.bind([leadId, 'lead_created', `Lead created from ${data.source || 'website'}`]);
-    stmt.step();
-    stmt.free();
-
-    // Get the created lead
-    const lead = await dbGet('SELECT * FROM leads WHERE id = ?', [leadId]);
+    await dbRun('activity_logs', {
+      lead_id: lead.id,
+      action: 'lead_created',
+      details: `Lead created from ${data.source || 'website'}`,
+    }, 'insert');
 
     return NextResponse.json({ lead }, { status: 201 });
   } catch (error) {

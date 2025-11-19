@@ -13,7 +13,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const user = await dbGet('SELECT * FROM users WHERE email = ?', [email]) as any;
+    const user = await dbGet('users', { email }) as any;
 
     if (!user || !comparePassword(password, user.password)) {
       return NextResponse.json(
