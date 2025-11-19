@@ -16,6 +16,15 @@ const supabase = createClient(supabaseUrl, supabaseKey, {
   },
 });
 
+(async () => {
+    const { error } = await supabase.from('users').select('id').limit(1);
+    if (error) {
+      console.error('❌ Failed to connect to Supabase:', error.message);
+    } else {
+      console.log('✅ Successfully connected to Supabase database');
+    }
+  })();
+
 // Initialize database schema (run this once via SQL Editor in Supabase)
 export async function initDatabase() {
   // This should be run via Supabase SQL Editor
