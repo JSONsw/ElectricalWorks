@@ -3,6 +3,14 @@ import { dbGet, dbAll, dbRun } from '@/lib/db';
 import { getAuthUser } from '@/lib/auth';
 import supabase from '@/lib/db';
 
+function isTrade(x: any): x is { name?: string | null; phone?: string | null; email?: string | null } {
+    return (
+      x &&
+      typeof x === "object" &&
+      ("name" in x || "phone" in x || "email" in x)
+    );
+  }
+
 // GET /api/leads/[id] - Get single lead
 export async function GET(
   request: NextRequest,
@@ -38,11 +46,12 @@ export async function GET(
 
     // Transform to match expected format
     const transformedLead = {
-      ...lead,
-      assigned_trade_name: assignedTrade?.name || null,
-      assigned_trade_phone: assignedTrade?.phone || null,
-      assigned_trade_email: assignedTrade?.email || null,
-    };
+        ...lead,
+        assigned_trade_name: isTrade(assignedTrade) ? assignedTrade.name ?? null : null,
+        assigned_trade_phone: isTrade(assignedTrade) ? assignedTrade.phone ?? null : null,
+        assigned_trade_email: isTrade(assignedTrade) ? assignedTrade.email ?? null : null,
+      };
+      
 
     // Get activity logs
     const activities = await dbAll('activity_logs', { lead_id: parseInt(params.id) }, '*', 'created_at DESC');
