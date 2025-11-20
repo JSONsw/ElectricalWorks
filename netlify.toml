@@ -4,6 +4,8 @@
 [build.environment]
   NODE_VERSION = "18"
   NPM_FLAGS = "--legacy-peer-deps"
+  NEXT_PUBLIC_SUPABASE_URL=https://yattqmfwqbfrdbmqxbvg.supabase.co
+ NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlhdHRxbWZ3cWJmcmRibXF4YnZnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM1ODQ4MzUsImV4cCI6MjA3OTE2MDgzNX0.mbJeO_U93vuRIsJwnBlbP0LigU4qQktECI2Us3Tj2os
 
 [functions]
   node_bundler = "esbuild"
